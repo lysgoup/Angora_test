@@ -21,6 +21,10 @@ pub struct Depot {
     pub num_hangs: AtomicUsize,
     pub num_crashes: AtomicUsize,
     pub dirs: DepotDir,
+
+    //new
+    pub context_queue: Mutex<PriorityQueue<CondStmt, QPriority>>,
+    pub num_context_inputs: AtomicUsize,
 }
 
 impl Depot {
@@ -31,6 +35,10 @@ impl Depot {
             num_hangs: AtomicUsize::new(0),
             num_crashes: AtomicUsize::new(0),
             dirs: DepotDir::new(in_dir, out_dir),
+
+            //new
+            context_queue: Mutex::new(PriorityQueue::new()),
+            num_context_inputs: AtomicUsize::new(0),
         }
     }
 

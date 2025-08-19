@@ -35,7 +35,7 @@ pub fn fuzz_main(
 ) {
     pretty_env_logger::init();
 
-    let (seeds_dir, angora_out_dir, angora_context_out_dir) = initialize_directories(in_dir, out_dir, sync_afl);
+    let (seeds_dir, angora_out_dir) = initialize_directories(in_dir, out_dir, sync_afl);
     let command_option = command::CommandOpt::new(
         mode,
         track_target,
@@ -120,7 +120,7 @@ pub fn fuzz_main(
     };
 }
 
-fn initialize_directories(in_dir: &str, out_dir: &str, sync_afl: bool) -> (PathBuf, PathBuf, PathBuf) {
+fn initialize_directories(in_dir: &str, out_dir: &str, sync_afl: bool) -> (PathBuf, PathBuf) {
     let angora_out_dir = if sync_afl {
         gen_path_afl(out_dir)
     } else {
@@ -149,7 +149,7 @@ fn initialize_directories(in_dir: &str, out_dir: &str, sync_afl: bool) -> (PathB
         PathBuf::from(in_dir)
     };
 
-    (seeds_dir, angora_out_dir, angora_context_out_dir)
+    (seeds_dir, angora_out_dir)
 }
 
 fn gen_path_afl(out_dir: &str) -> PathBuf {

@@ -77,7 +77,15 @@ public:
 
   // For Reusing Pool
   DenseMap<uint64_t, u32> KeyToUid;  // key_hash -> uid
-  std::vector<std::tuple<std::string,uint64_t,uint64_t>> Pending; // (kind,key_hash,uid)
+  std::vector<std::tuple<
+    std::string,    // kind
+    uint64_t,       // key_hash
+    uint64_t,       // uid
+    std::string,    // function name
+    std::string,    // file name
+    unsigned,       // line
+    unsigned        // col
+  >> Pending;
   std::string MapPath; // 파일 경로
 
   // Const Variables
@@ -205,6 +213,11 @@ void AngoraLLVMPass::loadIdMap() {
   }
 }
 
+static inline const llvm::Instruction* getFirstInst(const llvm::BasicBlock &BB) {
+  if (BB.empty()) return nullptr;
+  return &*BB.begin(); // 가장 첫 번째 Instruction
+}
+
 u32 AngoraLLVMPass::getOrAssignBbUid(const BasicBlock &BB, u32 mod_uid) {
   std::string key = bbKeyString(BB, mod_uid);
   uint64_t kh = keyHash64(key);
@@ -218,7 +231,26 @@ u32 AngoraLLVMPass::getOrAssignBbUid(const BasicBlock &BB, u32 mod_uid) {
   u32 new_id = getRandomBasicBlockId();
 
   KeyToUid[kh] = new_id;
-  Pending.emplace_back("BB", kh, new_id);
+
+  const llvm::Instruction *Rep = getFirstInst(BB);
+  if (!Rep) {
+    // 비어 있는 BB면 대체로 Terminator가 없지만, 안전하게 처리
+    Rep = BB.getTerminator(); // 필요 시 다른 폴백
+  }
+
+  llvm::DebugLoc DL = Rep->getDebugLoc();
+  if (DL) {
+    const llvm::DILocation *Loc = DL.get();
+    const llvm::DIScope *Scope = Loc->getScope();
+    std::string file = Scope->getFilename().str();
+    std::string fn = BB.getParent()->getName().str();
+    unsigned line = Loc->getLine();
+    unsigned col  = Loc->getColumn();
+
+    // Pending 에 기록
+    Pending.emplace_back("BB",kh, new_id, fn, file, line, col);
+  }
+  else Pending.emplace_back("BB", kh, new_id, "-", "-", -1, -1);
   return new_id;
 }
 
@@ -228,19 +260,13 @@ void AngoraLLVMPass::flushIdMap() {
   std::error_code EC;
   llvm::raw_fd_ostream os(MapPath, EC, llvm::sys::fs::OF_Text | llvm::sys::fs::OF_Append);
   if (EC) {
-    llvm::errs() << "[AngoraPass] Could not open idmap file: " << MapPath
-                 << " : " << EC.message() << "\n";
+    llvm::errs() << "[AngoraPass] Could not open idmap file: " << MapPath << " : " << EC.message() << "\n";
     return;
   }
 
   // 모듈 메타
   for (auto &t : Pending) {
-    const std::string &kind = std::get<0>(t);
-    uint64_t kh = std::get<1>(t);
-    uint64_t uid = std::get<2>(t);
-    // 간단 버전: 메타 최소만 기록
-    os << kind << "\t" << kh << "\t" << uid << "\t" << ModId << "\t"
-       << "-" << "\t" << "-" << "\t" << -1 << "\t" << -1 << "\n";
+    os << std::get<0>(t) << "\t" << std::get<1>(t) << "\t" << std::get<2>(t) << "\t" << ModId << "\t" << std::get<3>(t) << "\t" << std::get<4>(t) << "\t" << std::get<5>(t) << "\t" << std::get<6>(t) << "\n";
   }
   Pending.clear();
 }

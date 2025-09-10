@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <vector>
+#include <algorithm>
+#include <sstream>
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -14,9 +17,11 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -69,6 +74,11 @@ public:
   unsigned long int RandSeed = 1;
   bool is_bc;
   unsigned int inst_ratio = 100;
+
+  // For Reusing Pool
+  DenseMap<uint64_t, u32> KeyToUid;  // key_hash -> uid
+  std::vector<std::tuple<std::string,uint64_t,uint64_t>> Pending; // (kind,key_hash,uid)
+  std::string MapPath; // 파일 경로
 
   // Const Variables
   DenseSet<u32> UniqCidSet;
@@ -137,9 +147,103 @@ public:
   void visitExploitation(Instruction *Inst);
   void processCall(Instruction *Inst);
   void addFnWrap(Function &F);
+  void loadIdMap();
+  u32 getOrAssignBbUid(const BasicBlock &BB, u32 mod_uid);
+  void flushIdMap();
 };
 
 } // namespace
+
+static inline uint64_t fnv1a64(llvm::StringRef s, uint64_t h = 1469598103934665603ULL) {
+  for (char c : s) { h ^= (unsigned char)c; h *= 1099511628211ULL; }
+  return h;
+}
+
+static inline std::string bbKeyString(const llvm::BasicBlock &BB, u32 mod_uid) {
+  const llvm::Function *F = BB.getParent();
+  const llvm::Instruction *Rep = BB.getFirstNonPHIOrDbgOrLifetime();
+  if (!Rep) Rep = BB.getTerminator();
+
+  // 1) 디버그 기반
+  if (Rep) {
+    llvm::DebugLoc DL = Rep->getDebugLoc();
+    if (DL) {
+      const llvm::DILocation *Loc = DL.get();
+      const llvm::DIScope *S = Loc->getScope();
+      return (llvm::Twine(mod_uid) + "|" + F->getName() + "|" +
+              (S ? S->getFilename() : "") + ":" +
+              llvm::Twine(Loc->getLine()) + ":" + llvm::Twine(Loc->getColumn())).str();
+    }
+  }
+  // 2) IR 폴백
+  std::string bbir; { std::string tmp; llvm::raw_string_ostream os(tmp); os << BB; bbir = os.str(); }
+  return (llvm::Twine(mod_uid) + "|" + F->getName() + "|BBIR|" +
+          llvm::Twine(fnv1a64(bbir))).str();
+}
+
+static inline uint64_t keyHash64(llvm::StringRef key) { return fnv1a64(key); }
+
+void AngoraLLVMPass::loadIdMap() {
+  const char *env = std::getenv("ANGORA_ID_MAP");
+  MapPath = env ? std::string(env) : "/angora/angora_idmap.tsv";
+
+  std::ifstream in(MapPath);
+  if (!in.is_open()) return;
+
+  std::string kind, fn, file, extra;
+  uint64_t keyh, uid;
+  uint32_t modid; 
+  int line, col;
+
+  std::string linebuf;
+  while (std::getline(in, linebuf)) {
+    if (linebuf.empty() || linebuf[0] == '#') continue;
+    std::istringstream is(linebuf);
+    // kind  key_hash  uid  module_id  function  file  line  col  extra
+    if (!(is >> kind >> keyh >> uid >> modid >> fn >> file >> line >> col)) continue;
+    KeyToUid[keyh] = uid;
+  }
+}
+
+u32 AngoraLLVMPass::getOrAssignBbUid(const BasicBlock &BB, u32 mod_uid) {
+  std::string key = bbKeyString(BB, mod_uid);
+  uint64_t kh = keyHash64(key);
+
+  auto it = KeyToUid.find(kh);
+  if (it != KeyToUid.end()) {
+    return (u32)it->second;  // 재사용
+  }
+
+  // 없으면: 기존 방식으로 랜덤 생성
+  u32 new_id = getRandomBasicBlockId();
+
+  KeyToUid[kh] = new_id;
+  Pending.emplace_back("BB", kh, new_id);
+  return new_id;
+}
+
+void AngoraLLVMPass::flushIdMap() {
+  if (Pending.empty()) return;
+
+  std::error_code EC;
+  llvm::raw_fd_ostream os(MapPath, EC, llvm::sys::fs::OF_Text | llvm::sys::fs::OF_Append);
+  if (EC) {
+    llvm::errs() << "[AngoraPass] Could not open idmap file: " << MapPath
+                 << " : " << EC.message() << "\n";
+    return;
+  }
+
+  // 모듈 메타
+  for (auto &t : Pending) {
+    const std::string &kind = std::get<0>(t);
+    uint64_t kh = std::get<1>(t);
+    uint64_t uid = std::get<2>(t);
+    // 간단 버전: 메타 최소만 기록
+    os << kind << "\t" << kh << "\t" << uid << "\t" << ModId << "\t"
+       << "-" << "\t" << "-" << "\t" << -1 << "\t" << -1 << "\n";
+  }
+  Pending.clear();
+}
 
 char AngoraLLVMPass::ID = 0;
 
@@ -343,7 +447,8 @@ void AngoraLLVMPass::countEdge(Module &M, BasicBlock &BB) {
     return;
 
   // LLVMContext &C = M.getContext();
-  unsigned int cur_loc = getRandomBasicBlockId();
+  // 변경전: unsigned int cur_loc = getRandomBasicBlockId();
+  unsigned int cur_loc = getOrAssignBbUid(BB, ModId);
   ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
 
   BasicBlock::iterator IP = BB.getFirstInsertionPt();
@@ -831,6 +936,9 @@ bool AngoraLLVMPass::runOnModule(Module &M) {
 
   initVariables(M);
 
+  // ID Map이 있으면 메모리에 로드 (KeyToUid에 저장됨)
+  loadIdMap();
+
   if (DFSanMode)
     return true;
 
@@ -879,6 +987,9 @@ bool AngoraLLVMPass::runOnModule(Module &M) {
 
   if (is_bc)
     OKF("Max constraint id is %d", CidCounter);
+
+  flushIdMap();
+
   return true;
 }
 

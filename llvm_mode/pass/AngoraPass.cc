@@ -87,6 +87,9 @@ public:
     unsigned        // col
   >> Pending;
   std::string MapPath; // 파일 경로
+  DenseSet<uint64_t> UidUsed; // uid 중복 체크
+  uint64_t LoadKeyHashConflicts = 0;
+  u32 LoadUidConflicts     = 0;
 
   // Const Variables
   DenseSet<u32> UniqCidSet;
@@ -167,6 +170,8 @@ static inline uint64_t fnv1a64(llvm::StringRef s, uint64_t h = 14695981039346656
   return h;
 }
 
+static inline uint64_t keyHash64(llvm::StringRef key) { return fnv1a64(key); }
+
 static inline std::string bbKeyString(const llvm::BasicBlock &BB, u32 mod_uid) {
   const llvm::Function *F = BB.getParent();
   const llvm::Instruction *Rep = BB.getFirstNonPHIOrDbgOrLifetime();
@@ -189,8 +194,6 @@ static inline std::string bbKeyString(const llvm::BasicBlock &BB, u32 mod_uid) {
           llvm::Twine(fnv1a64(bbir))).str();
 }
 
-static inline uint64_t keyHash64(llvm::StringRef key) { return fnv1a64(key); }
-
 void AngoraLLVMPass::loadIdMap() {
   const char *env = std::getenv("ANGORA_ID_MAP");
   MapPath = env ? std::string(env) : "/angora/angora_idmap.tsv";
@@ -207,13 +210,35 @@ void AngoraLLVMPass::loadIdMap() {
   while (std::getline(in, linebuf)) {
     if (linebuf.empty() || linebuf[0] == '#') continue;
     std::istringstream is(linebuf);
-    // kind  key_hash  uid  module_id  function  file  line  col  extra
+    // kind  key_hash  uid  module_id  function  file  line  col
     if (!(is >> kind >> keyh >> uid >> modid >> fn >> file >> line >> col)) continue;
+
+    // key_hash 충돌: 같은 key_hash인데 uid가 다름
+    auto it = KeyToUid.find(keyh);
+    if (it != KeyToUid.end()) {
+      if(it->second != uid){
+        ++LoadKeyHashConflicts;
+        llvm::errs() << "[IDMAP][WARN] key_hash conflict at load: "
+                    << " keyh=" << keyh
+                    << " prev_uid=" << it->second
+                    << " new_uid=" << uid << "\n";
+      }
+      // 기존 값만 유지
+      continue;
+    }
+
     KeyToUid[keyh] = uid;
+
+    //TODO: 이미 파일에 충돌된 채로 써져있는 uid는 어떻게 할거?
+    // UID 충돌: 서로 다른 key_hash들이 같은 uid
+    if (!UidUsed.insert(uid).second) {
+      ++LoadUidConflicts;
+      llvm::errs() << "[IDMAP][WARN] uid reused by multiple keys at load: uid=" << uid << "\n";
+    }
   }
 }
 
-static inline const llvm::Instruction* getFirstInst(const llvm::BasicBlock &BB) {
+static inline const Instruction* getFirstInst(const BasicBlock &BB) {
   if (BB.empty()) return nullptr;
   return &*BB.begin(); // 가장 첫 번째 Instruction
 }
@@ -229,13 +254,17 @@ u32 AngoraLLVMPass::getOrAssignBbUid(const BasicBlock &BB, u32 mod_uid) {
 
   // 없으면: 기존 방식으로 랜덤 생성
   u32 new_id = getRandomBasicBlockId();
+  // UID 충돌 방지(선택): 이미 사용된 UID면 새로 뽑기
+  int guard = 0;
+  while (!UidUsed.insert(new_id).second && guard++ < 16) {
+    new_id = getRandomInstructionId();
+  }
 
   KeyToUid[kh] = new_id;
 
   const llvm::Instruction *Rep = getFirstInst(BB);
   if (!Rep) {
-    // 비어 있는 BB면 대체로 Terminator가 없지만, 안전하게 처리
-    Rep = BB.getTerminator(); // 필요 시 다른 폴백
+    Rep = BB.getTerminator();
   }
 
   llvm::DebugLoc DL = Rep->getDebugLoc();

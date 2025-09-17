@@ -236,11 +236,11 @@ impl Executor {
         // new edge: one byte in bitmap
         let (has_new_path, has_new_edge, edge_num, new_branches_id) = self.branches.has_new_ext(status);
 
-        if !new_branches_id.is_empty() {
-            let p = self.cmd.tmp_dir.join("/angora/first_edges.log");
-            Self::append_first_edges_to_file(&p, &new_branches_id);
-            log::info!("Wrote {} new-first edges to {:?}", new_branches_id.len(), p);
-        }
+        // if !new_branches_id.is_empty() {
+        //     let p = self.cmd.tmp_dir.join("/angora/first_edges.log");
+        //     Self::append_first_edges_to_file(&p, &new_branches_id);
+        //     log::info!("Wrote {} new-first edges to {:?}", new_branches_id.len(), p);
+        // }
 
         if has_new_path {
             self.has_new_path = true;

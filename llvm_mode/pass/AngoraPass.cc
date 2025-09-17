@@ -214,27 +214,27 @@ void AngoraLLVMPass::loadIdMap() {
     if (!(is >> kind >> keyh >> uid >> modid >> fn >> file >> line >> col)) continue;
 
     // key_hash 충돌: 같은 key_hash인데 uid가 다름
-    auto it = KeyToUid.find(keyh);
-    if (it != KeyToUid.end()) {
-      if(it->second != uid){
-        ++LoadKeyHashConflicts;
-        llvm::errs() << "[IDMAP][WARN] key_hash conflict at load: "
-                    << " keyh=" << keyh
-                    << " prev_uid=" << it->second
-                    << " new_uid=" << uid << "\n";
-      }
-      // 기존 값만 유지
-      continue;
-    }
+    // auto it = KeyToUid.find(keyh);
+    // if (it != KeyToUid.end()) {
+    //   if(it->second != uid){
+    //     ++LoadKeyHashConflicts;
+    //     llvm::errs() << "[IDMAP][WARN] key_hash conflict at load: "
+    //                 << " keyh=" << keyh
+    //                 << " prev_uid=" << it->second
+    //                 << " new_uid=" << uid << "\n";
+    //   }
+    //   // 기존 값만 유지
+    //   continue;
+    // }
 
     KeyToUid[keyh] = uid;
 
     //TODO: 이미 파일에 충돌된 채로 써져있는 uid는 어떻게 할거?
     // UID 충돌: 서로 다른 key_hash들이 같은 uid
-    if (!UidUsed.insert(uid).second) {
-      ++LoadUidConflicts;
-      llvm::errs() << "[IDMAP][WARN] uid reused by multiple keys at load: uid=" << uid << "\n";
-    }
+    // if (!UidUsed.insert(uid).second) {
+    //   ++LoadUidConflicts;
+    //   llvm::errs() << "[IDMAP][WARN] uid reused by multiple keys at load: uid=" << uid << "\n";
+    // }
   }
 }
 
@@ -439,6 +439,10 @@ void AngoraLLVMPass::initVariables(Module &M) {
                            {Int32Ty, Int32Ty, Int64Ty});
 
   } else if (TrackMode) {
+    AngoraPrevLoc =
+        new GlobalVariable(M, Int32Ty, false, GlobalValue::CommonLinkage,
+                           ConstantInt::get(Int32Ty, 0), "__angora_prev_loc", 0,
+                           GlobalVariable::GeneralDynamicTLSModel, 0, false);
     GET_OR_INSERT_FUNCTION(
         TraceCmpTT, VoidTy, "__angora_trace_cmp_tt",
         {Int32Ty, Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int64Ty, Int32Ty})
@@ -498,6 +502,39 @@ void AngoraLLVMPass::initVariables(Module &M) {
 // Coverage statistics: AFL's Branch count
 // Angora enable function-call context.
 void AngoraLLVMPass::countEdge(Module &M, BasicBlock &BB) {
+  if (TrackMode){
+    unsigned int cur_loc = getOrAssignBbUid(BB, ModId);
+    ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+
+    BasicBlock::iterator IP = BB.getFirstInsertionPt();
+    IRBuilder<> IRB(&(*IP));
+
+    LoadInst *PrevLoc = IRB.CreateLoad(AngoraPrevLoc);
+    setInsNonSan(PrevLoc);
+
+    Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, Int32Ty);
+    setValueNonSan(PrevLocCasted);
+
+    Value *NewPrevLoc = NULL;
+    if (num_fn_ctx != 0) { // Call-based context
+      // Load ctx
+      LoadInst *CtxVal = IRB.CreateLoad(AngoraContext);
+      setInsNonSan(CtxVal);
+
+      Value *CtxValCasted = IRB.CreateZExt(CtxVal, Int32Ty);
+      setValueNonSan(CtxValCasted);
+      // Udate PrevLoc
+      NewPrevLoc =
+          IRB.CreateXor(CtxValCasted, ConstantInt::get(Int32Ty, cur_loc >> 1));
+    } else { // disable context
+      NewPrevLoc = ConstantInt::get(Int32Ty, cur_loc >> 1);
+    }
+    setValueNonSan(NewPrevLoc);
+
+    StoreInst *Store = IRB.CreateStore(NewPrevLoc, AngoraPrevLoc);
+    setInsNonSan(Store);
+  }
+
   if (!FastMode || skipBasicBlock())
     return;
 
@@ -838,6 +875,25 @@ void AngoraLLVMPass::processBoolCmp(Value *Cond, Constant *Cid,
     setValueNonSan(OpArg[0]);
     LoadInst *CurCtx = IRB.CreateLoad(AngoraContext);
     setInsNonSan(CurCtx);
+
+    //현재 BB ID 구하기
+    BasicBlock *BB = InsertPoint->getParent();
+    unsigned int cur_loc = getOrAssignBbUid(*BB, ModId);
+    ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+    //다음 후보 BB들의 ID 구하기
+    BranchInst *Br = dyn_cast<BranchInst>(InsertPoint);
+    BasicBlock *TrueBB  = Br->getSuccessor(0);
+    BasicBlock *FalseBB = Br->getSuccessor(1);
+    unsigned int true_loc  = getOrAssignBbUid(*TrueBB,  ModId);
+    unsigned int false_loc = getOrAssignBbUid(*FalseBB, ModId);
+    ConstantInt *TrueLocCI  = ConstantInt::get(Int32Ty, true_loc);
+    ConstantInt *FalseLocCI = ConstantInt::get(Int32Ty, false_loc);
+    //현재 cond값을 기준으로 다음 BB 선택
+    Value *IsTrue = IRB.CreateICmpNE(CondExt, ConstantInt::get(Int32Ty, 0));
+    setValueNonSan(IsTrue);
+    Value *NextLoc = IRB.CreateSelect(IsTrue, TrueLocCI, FalseLocCI);
+    setValueNonSan(NextLoc);
+
     CallInst *ProxyCall =
         IRB.CreateCall(TraceCmpTT, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
                                     OpArg[1], CondExt});

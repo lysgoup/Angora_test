@@ -72,6 +72,57 @@ pub extern "C" fn __dfsw___angora_trace_cmp_tt(
 }
 
 #[no_mangle]
+pub extern "C" fn __angora_trace_cmp_tt_ex(
+    _cmpid: u32,
+    _context: u32,
+    _size: u32,
+    _op: u32,
+    _arg1: u64,
+    _arg2: u64,
+    _condition: u32,
+    _edge_id: u32,
+) {
+    panic!("Forbid calling __angora_trace_cmp_tt_ex directly");
+}
+
+#[no_mangle]
+pub extern "C" fn __dfsw___angora_trace_cmp_tt_ex(
+    cmpid: u32,
+    context: u32,
+    size: u32,
+    op: u32,
+    arg1: u64,
+    arg2: u64,
+    condition: u32,
+    edge_id: u32,
+    _l0: DfsanLabel,            // cmpid
+    _l1: DfsanLabel,            // context
+    _l2: DfsanLabel,            // size
+    _l3: DfsanLabel,            // op
+    l4: DfsanLabel,             // arg1
+    l5: DfsanLabel,             // arg2
+    _l6: DfsanLabel,            // condition
+    _l7: DfsanLabel,            // edge_id
+) {
+    // arg1/arg2 라벨만 관심 (기존과 동일)
+    let lb1 = l4;
+    let lb2 = l5;
+    if lb1 == 0 && lb2 == 0 {
+        return;
+    }
+
+    let op = infer_eq_sign(op, lb1, lb2);
+    infer_shape(lb1, size);
+    infer_shape(lb2, size);
+
+    // edge_id까지 포함해서 기록하도록 함수 확장 (추천)
+    log_cmp_ex(cmpid, context, condition, op, size, lb1, lb2, arg1, arg2, edge_id);
+
+    // 만약 기존 log_cmp만 쓰고 싶다면, 거기에 edge_id 필드를 추가하거나
+    // thread-local에 edge_id를 잠시 stash하는 보조 함수를 두는 것도 가능.
+}
+
+#[no_mangle]
 pub extern "C" fn __angora_trace_switch_tt(
     _a: u32,
     _b: u32,
@@ -241,6 +292,39 @@ fn log_cmp(
     lb2: u32,
     arg1: u64,
     arg2: u64,
+) {
+    let cond = CondStmtBase {
+        cmpid,
+        context,
+        order: 0,
+        belong: 0,
+        condition,
+        level: 0,
+        op,
+        size,
+        lb1,
+        lb2,
+        arg1,
+        arg2,
+    };
+    let mut lcl = LC.lock().expect("Could not lock LC.");
+    if let Some(ref mut lc) = *lcl {
+        lc.save(cond);
+    }
+}
+
+#[inline]
+fn log_cmp_ex(
+    cmpid: u32,
+    context: u32,
+    condition: u32,
+    op: u32,
+    size: u32,
+    lb1: u32,
+    lb2: u32,
+    arg1: u64,
+    arg2: u64,
+    edge_id: u32,
 ) {
     let cond = CondStmtBase {
         cmpid,

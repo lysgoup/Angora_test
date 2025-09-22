@@ -124,6 +124,7 @@ public:
   FunctionCallee TraceSwTT;
   FunctionCallee TraceFnTT;
   FunctionCallee TraceExploitTT;
+  FunctionCallee TraceCmpTTEx;
 
   // Custom setting
   AngoraABIList ABIList;
@@ -446,6 +447,9 @@ void AngoraLLVMPass::initVariables(Module &M) {
     GET_OR_INSERT_FUNCTION(
         TraceCmpTT, VoidTy, "__angora_trace_cmp_tt",
         {Int32Ty, Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int64Ty, Int32Ty})
+    GET_OR_INSERT_FUNCTION(
+        TraceCmpTTEx, VoidTy, "__angora_trace_cmp_tt_ex",
+        {Int32Ty, Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int64Ty, Int32Ty, Int32Ty})
     GET_OR_INSERT_FUNCTION(
         TraceSwTT, VoidTy, "__angora_trace_switch_tt",
         {Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int32Ty, Int64PtrTy})
@@ -873,13 +877,12 @@ void AngoraLLVMPass::processBoolCmp(Value *Cond, Constant *Cid,
     setValueNonSan(CondExt);
     OpArg[0] = IRB.CreateZExt(CondExt, Int64Ty);
     setValueNonSan(OpArg[0]);
-    LoadInst *CurCtx = IRB.CreateLoad(AngoraContext);
-    setInsNonSan(CurCtx);
 
-    //현재 BB ID 구하기
-    BasicBlock *BB = InsertPoint->getParent();
-    unsigned int cur_loc = getOrAssignBbUid(*BB, ModId);
-    ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
+    //현재 BB ID 구하기 -> 이미 PrevLoc에 들어있음
+    LoadInst *PrevLd = IRB.CreateLoad(AngoraPrevLoc);
+    setInsNonSan(PrevLd);
+    Value *Prev32 = IRB.CreateZExt(PrevLd, Int32Ty);
+    setValueNonSan(Prev32);
     //다음 후보 BB들의 ID 구하기
     BranchInst *Br = dyn_cast<BranchInst>(InsertPoint);
     BasicBlock *TrueBB  = Br->getSuccessor(0);
@@ -893,10 +896,18 @@ void AngoraLLVMPass::processBoolCmp(Value *Cond, Constant *Cid,
     setValueNonSan(IsTrue);
     Value *NextLoc = IRB.CreateSelect(IsTrue, TrueLocCI, FalseLocCI);
     setValueNonSan(NextLoc);
+    //edge ID 계산
+    Value *EdgeId = IRB.CreateXor(Prev32, NextLoc);
+    setValueNonSan(EdgeId);
 
+    LoadInst *CurCtx = IRB.CreateLoad(AngoraContext);
+    setInsNonSan(CurCtx);
+    // CallInst *ProxyCall =
+    //     IRB.CreateCall(TraceCmpTT, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
+    //                                 OpArg[1], CondExt});
     CallInst *ProxyCall =
-        IRB.CreateCall(TraceCmpTT, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
-                                    OpArg[1], CondExt});
+        IRB.CreateCall(TraceCmpTTEx, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
+                                    OpArg[1], CondExt, EdgeId});
     setInsNonSan(ProxyCall);
   }
 }

@@ -4,6 +4,8 @@ use angora_common::{cond_stmt_base::*, defs};
 use lazy_static::lazy_static;
 use libc;
 use std::{slice, sync::Mutex};
+use std::fs::OpenOptions;
+use std::io::Write;
 
 // use shm_conds;
 lazy_static! {
@@ -80,7 +82,8 @@ pub extern "C" fn __angora_trace_cmp_tt_ex(
     _arg1: u64,
     _arg2: u64,
     _condition: u32,
-    _edge_id: u32,
+    _edge_true: u32,
+    _edge_false: u32,
 ) {
     panic!("Forbid calling __angora_trace_cmp_tt_ex directly");
 }
@@ -94,7 +97,8 @@ pub extern "C" fn __dfsw___angora_trace_cmp_tt_ex(
     arg1: u64,
     arg2: u64,
     condition: u32,
-    edge_id: u32,
+    edge_true: u32,
+    edge_false: u32,
     _l0: DfsanLabel,            // cmpid
     _l1: DfsanLabel,            // context
     _l2: DfsanLabel,            // size
@@ -102,7 +106,8 @@ pub extern "C" fn __dfsw___angora_trace_cmp_tt_ex(
     l4: DfsanLabel,             // arg1
     l5: DfsanLabel,             // arg2
     _l6: DfsanLabel,            // condition
-    _l7: DfsanLabel,            // edge_id
+    _l7: DfsanLabel,            // edge_true
+    _l8: DfsanLabel,            // edge_false
 ) {
     // arg1/arg2 라벨만 관심 (기존과 동일)
     let lb1 = l4;
@@ -116,10 +121,17 @@ pub extern "C" fn __dfsw___angora_trace_cmp_tt_ex(
     infer_shape(lb2, size);
 
     // edge_id까지 포함해서 기록하도록 함수 확장 (추천)
-    log_cmp_ex(cmpid, context, condition, op, size, lb1, lb2, arg1, arg2, edge_id);
+    // 로그 파일 열기 (없으면 생성, 있으면 append 모드로 열기)
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/angora/edge_log.txt")
+        .expect("Failed to open edge_log.txt");
 
-    // 만약 기존 log_cmp만 쓰고 싶다면, 거기에 edge_id 필드를 추가하거나
-    // thread-local에 edge_id를 잠시 stash하는 보조 함수를 두는 것도 가능.
+    // edge_true, edge_false 값 기록
+    writeln!(file, "edge_true = {:?}, edge_false = {:?}", edge_true, edge_false)
+        .expect("Failed to write to edge_log.txt");
+    log_cmp_ex(cmpid, context, condition, op, size, lb1, lb2, arg1, arg2, edge_true, edge_false);
 }
 
 #[no_mangle]
@@ -324,7 +336,8 @@ fn log_cmp_ex(
     lb2: u32,
     arg1: u64,
     arg2: u64,
-    edge_id: u32,
+    edge_true: u32,
+    edge_false: u32,
 ) {
     let cond = CondStmtBase {
         cmpid,

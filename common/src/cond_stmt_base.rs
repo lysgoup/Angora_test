@@ -19,6 +19,9 @@ pub struct CondStmtBase {
 
     pub arg1: u64,
     pub arg2: u64,
+
+    // pub edge_true: u32,
+    // pub edge_false: u32,
 }
 
 /*

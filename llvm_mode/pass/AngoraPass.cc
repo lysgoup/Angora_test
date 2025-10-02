@@ -449,7 +449,7 @@ void AngoraLLVMPass::initVariables(Module &M) {
         {Int32Ty, Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int64Ty, Int32Ty})
     GET_OR_INSERT_FUNCTION(
         TraceCmpTTEx, VoidTy, "__angora_trace_cmp_tt_ex",
-        {Int32Ty, Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int64Ty, Int32Ty, Int32Ty})
+        {Int32Ty, Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int64Ty, Int32Ty, Int32Ty, Int32Ty})
     GET_OR_INSERT_FUNCTION(
         TraceSwTT, VoidTy, "__angora_trace_switch_tt",
         {Int32Ty, Int32Ty, Int32Ty, Int64Ty, Int32Ty, Int64PtrTy})
@@ -503,11 +503,40 @@ void AngoraLLVMPass::initVariables(Module &M) {
   }
 };
 
+void logging_BBID(char * path, BasicBlock &BB, unsigned int cur_loc){
+  std::ofstream log(path, std::ios::app);
+  if (!log.is_open()) return;
+
+  const llvm::Instruction *Rep = getFirstInst(BB);
+  if (!Rep) {
+    Rep = BB.getTerminator();
+  }
+
+  llvm::DebugLoc DL = Rep->getDebugLoc();
+  if (DL) {
+    const llvm::DILocation *Loc = DL.get();
+    const llvm::DIScope *Scope = Loc->getScope();
+    std::string file = Scope->getFilename().str();
+    std::string fn = BB.getParent()->getName().str();
+    unsigned line = Loc->getLine();
+    unsigned col  = Loc->getColumn();
+
+    log << cur_loc << "\t" << file << "\t" << fn << "\t" << line << "\t" << col << "\n";
+  }
+  else{
+    log << cur_loc << "\t" << "-" << "\t" << "-" << "\t" << -1 << "\t" << -1 << "\n";
+  }
+
+  return;
+}
+
 // Coverage statistics: AFL's Branch count
 // Angora enable function-call context.
 void AngoraLLVMPass::countEdge(Module &M, BasicBlock &BB) {
   if (TrackMode){
     unsigned int cur_loc = getOrAssignBbUid(BB, ModId);
+    char * log_file = "/angora/track_log.tsv";
+    logging_BBID(log_file, BB, cur_loc);
     ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
 
     BasicBlock::iterator IP = BB.getFirstInsertionPt();
@@ -545,6 +574,8 @@ void AngoraLLVMPass::countEdge(Module &M, BasicBlock &BB) {
   // LLVMContext &C = M.getContext();
   // 변경전: unsigned int cur_loc = getRandomBasicBlockId();
   unsigned int cur_loc = getOrAssignBbUid(BB, ModId);
+  char * log_file = "/angora/fast_log.tsv";
+  logging_BBID(log_file, BB, cur_loc);
   ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
 
   BasicBlock::iterator IP = BB.getFirstInsertionPt();
@@ -891,23 +922,21 @@ void AngoraLLVMPass::processBoolCmp(Value *Cond, Constant *Cid,
     unsigned int false_loc = getOrAssignBbUid(*FalseBB, ModId);
     ConstantInt *TrueLocCI  = ConstantInt::get(Int32Ty, true_loc);
     ConstantInt *FalseLocCI = ConstantInt::get(Int32Ty, false_loc);
-    //현재 cond값을 기준으로 다음 BB 선택
-    Value *IsTrue = IRB.CreateICmpNE(CondExt, ConstantInt::get(Int32Ty, 0));
-    setValueNonSan(IsTrue);
-    Value *NextLoc = IRB.CreateSelect(IsTrue, TrueLocCI, FalseLocCI);
-    setValueNonSan(NextLoc);
-    //edge ID 계산
-    Value *EdgeId = IRB.CreateXor(Prev32, NextLoc);
-    setValueNonSan(EdgeId);
+    // True인 경우의 EdgeId (Prev32 xor TrueLoc)
+    Value *EdgeIdTrue = IRB.CreateXor(Prev32, TrueLocCI);
+    setValueNonSan(EdgeIdTrue);
+    // False인 경우의 EdgeId (Prev32 xor FalseLoc)
+    Value *EdgeIdFalse = IRB.CreateXor(Prev32, FalseLocCI);
+    setValueNonSan(EdgeIdFalse);
 
     LoadInst *CurCtx = IRB.CreateLoad(AngoraContext);
     setInsNonSan(CurCtx);
-    // CallInst *ProxyCall =
-    //     IRB.CreateCall(TraceCmpTT, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
-    //                                 OpArg[1], CondExt});
     CallInst *ProxyCall =
-        IRB.CreateCall(TraceCmpTTEx, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
-                                    OpArg[1], CondExt, EdgeId});
+        IRB.CreateCall(TraceCmpTT, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
+                                    OpArg[1], CondExt});
+    // CallInst *ProxyCall =
+    //     IRB.CreateCall(TraceCmpTTEx, {Cid, CurCtx, SizeArg, TypeArg, OpArg[0],
+    //                                 OpArg[1], CondExt, EdgeIdTrue, EdgeIdFalse});
     setInsNonSan(ProxyCall);
   }
 }
